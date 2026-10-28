@@ -45,9 +45,14 @@ function getConfig() {
 
 function getHostConfig() {
   const c = getConfig();
-  const httpUrl = (c.snowluma?.httpUrl ?? 'http://127.0.0.1:3000').replace(/\/+$/, '');
-  const homeDir = c.snowluma?.homeDir ?? (c.snowluma?.launcherPath ? path.dirname(c.snowluma.launcherPath) : '');
-  return { httpUrl, homeDir, token: c.snowluma?.accessToken ?? '' };
+  const napcat = c.onebot?.adapter === 'napcat';
+  const configured = napcat ? (c.onebot ?? {}) : (c.snowluma ?? {});
+  const httpUrl = String(configured.httpUrl ?? c.snowluma?.httpUrl ?? 'http://127.0.0.1:3000').replace(/\/+$/, '');
+  const homeDir = napcat ? '' : (c.snowluma?.homeDir ?? (c.snowluma?.launcherPath ? path.dirname(c.snowluma.launcherPath) : ''));
+  const token = String(napcat
+    ? (configured.httpAccessToken ?? configured.accessToken ?? c.snowluma?.accessToken ?? '')
+    : (configured.accessToken ?? ''));
+  return { httpUrl, homeDir, token, adapter: napcat ? 'napcat' : 'snowluma' };
 }
 
 async function gatewayInfo() {
@@ -71,11 +76,11 @@ async function gatewayInfo() {
   }
 }
 
-const server = new McpServer({ name: 'snowluma-host', version: '0.2.0-r4' });
+const server = new McpServer({ name: 'snowluma-host', version: '0.2.0-r5' });
 
 server.tool(
   'snowluma_status',
-  '检查 SnowLuma OneBot 网关是否在线（只读探活 get_login_info）。返回网关可达性、QQ 在线状态与账号信息。网关不可达时返回可操作的提示（本程序不会代你启动 SnowLuma）。',
+  '检查当前 QQ OneBot 网关（SnowLuma 或 NapCat）是否在线（只读探活 get_login_info）。返回网关可达性、QQ 在线状态与账号信息；本程序不会替你部署或启停网关。',
   {},
   async () => {
     const hc = getHostConfig();
@@ -83,7 +88,7 @@ server.tool(
     // 只读工具：不再暴露本机路径/PID（那需要进程控制能力，而该能力已被移除）。
     const payload = { ...info };
     if (info.reachable === false) {
-      payload.hint = 'SnowLuma 网关不可达。请自行启动 SnowLuma（本程序不代装、不代启，原因见项目文档的合规说明 L6）。'
+      payload.hint = `${hc.adapter === 'napcat' ? 'NapCat' : 'SnowLuma'} 网关不可达。请检查对应服务是否运行、OneBot HTTP API 是否启用及配置的 URL/token 是否正确。`
         + (hc.homeDir ? '' : ' 若 config.json 的 snowluma.httpUrl 与实际端口不一致，也请一并检查。');
     }
     return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
