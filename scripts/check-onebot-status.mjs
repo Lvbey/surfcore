@@ -3,16 +3,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient } from '@snowluma/sdk';
+import { NapCatWebSocketClient } from '../src/napcat-client.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const cfg = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'config.json'), 'utf8'));
-const { wsUrl, httpUrl, accessToken } = cfg.snowluma;
-const baseHttp = String(httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+const napcat = cfg.onebot?.adapter === 'napcat';
+const selected = napcat ? (cfg.onebot ?? {}) : (cfg.snowluma ?? {});
+const wsUrl = selected.wsUrl || cfg.snowluma?.wsUrl || 'ws://127.0.0.1:3001';
+const httpUrl = selected.httpUrl || cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000';
+const wsToken = napcat ? (selected.wsAccessToken ?? selected.accessToken ?? '') : (cfg.snowluma?.accessToken ?? '');
+const httpToken = napcat ? (selected.httpAccessToken ?? selected.accessToken ?? '') : (cfg.snowluma?.accessToken ?? '');
+const baseHttp = String(httpUrl).replace(/\/+$/, '');
 
 console.log('配置:');
 console.log(`  wsUrl   = ${wsUrl}`);
 console.log(`  httpUrl = ${baseHttp}`);
-console.log(`  token   = ${accessToken ? '已配置' : '未配置'}`);
+console.log(`  adapter = ${napcat ? 'NapCat' : 'SnowLuma'}`);
+console.log(`  WS token   = ${wsToken ? '已配置' : '未配置'}`);
+console.log(`  HTTP token = ${httpToken ? '已配置' : '未配置'}`);
 
 // 1) HTTP API 检查（MCP 工具走这里，426 是最常见问题）
 try {
@@ -28,7 +36,7 @@ try {
   }
   if (!res.ok) {
     console.error(`\n❌ HTTP ${res.status}: 无法访问 ${baseHttp}/get_login_info`);
-    console.error('   请确认 SnowLuma 已启动、HTTP API 已开启，且端口正确。');
+    console.error(`   请确认 ${napcat ? 'NapCat' : 'SnowLuma'} 已启动、HTTP API 已启用，且端口/token 正确。`);
     process.exit(1);
   }
   const body = await res.json();
@@ -41,17 +49,19 @@ try {
   }
 } catch (error) {
   console.error(`\n❌ 无法连接 ${baseHttp}/get_login_info: ${error?.message ?? error}`);
-  console.error('   请确认 SnowLuma 已启动、HTTP API 端口正确。');
+  console.error(`   请确认 ${napcat ? 'NapCat' : 'SnowLuma'} 已启动、HTTP API 已启用，且端口/token 正确。`);
   process.exit(1);
 }
 
 // 2) WebSocket 连接检查
 console.log('\n--- WebSocket ---');
-const bot = new SnowLumaWebSocketClient({ url: wsUrl, accessToken: accessToken || undefined, reconnect: false });
+const bot = napcat
+  ? new NapCatWebSocketClient({ url: wsUrl, httpUrl: baseHttp, accessToken: wsToken, httpAccessToken: httpToken, reconnect: false })
+  : new SnowLumaWebSocketClient({ url: wsUrl, accessToken: wsToken || undefined, reconnect: false });
 const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('超时')), 10_000));
 try {
   await Promise.race([bot.connect(), timeout]);
-  console.log('✅ 已连接网关');
+  console.log(`✅ 已连接 ${napcat ? 'NapCat' : 'SnowLuma'} 网关`);
   const login = await bot.getLoginInfo();
   console.log('✅ get_login_info:', JSON.stringify(login));
   try {
