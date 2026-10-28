@@ -11,7 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const HOME = process.env.USERPROFILE || os.homedir();
+export const HOME = process.platform === 'win32' ? (process.env.USERPROFILE || os.homedir()) : os.homedir();
 export const DSH_HOME = process.env.DSH_HOME || path.join(HOME, '.dsh');
 export const STATE_DIR = path.join(DSH_HOME, 'surfcore');
 export const BACKUP_DIR = path.join(STATE_DIR, 'backups');
