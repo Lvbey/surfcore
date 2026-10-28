@@ -53,9 +53,13 @@ function getAccess() {
 
 function getOneBotConfig() {
   const c = getConfig();
+  const napcat = c.onebot?.adapter === 'napcat';
+  const configured = napcat ? (c.onebot ?? {}) : (c.snowluma ?? {});
   return {
-    httpUrl: (c.snowluma?.httpUrl ?? 'http://127.0.0.1:3000').replace(/\/+$/, ''),
-    token: c.snowluma?.accessToken ?? ''
+    httpUrl: String(configured.httpUrl ?? c.snowluma?.httpUrl ?? 'http://127.0.0.1:3000').replace(/\/+$/, ''),
+    token: String(napcat
+      ? (configured.httpAccessToken ?? configured.accessToken ?? c.snowluma?.accessToken ?? '')
+      : (configured.accessToken ?? ''))
   };
 }
 
