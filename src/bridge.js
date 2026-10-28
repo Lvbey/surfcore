@@ -15,7 +15,8 @@ import yaml from 'js-yaml';
 import { extractPresetPrefix, presetPromptBlockers, presetPromptWarnings, renderPresetPromptYaml } from './preset-prompt.js';
 import { GEN1_ROLE_LINE_RE, parseRoleSections, roleCharStats, roleSectionReport, selectRoleText } from './role-card.js';
 import { fileURLToPath } from 'node:url';
-import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
+import { SnowLumaWebSocketClient } from '@snowluma/sdk';
+import { NapCatWebSocketClient, text } from './napcat-client.js';
 import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } from './dsh-client.js';
 import { mdToPlain, splitForQQ, truncateText, truncateTextTail } from './md-to-plain.js';
 import { SENSITIVE_RE } from './sensitive.js';
@@ -764,6 +765,13 @@ function loadConfig() {
   const p = path.join(ROOT, 'config.json');
   const file = readJsonSafe(p, null, true);
   if (!file || typeof file !== 'object' || Array.isArray(file)) throw new Error(`配置格式错误：${p}`);
+  const rawOneBot = file.onebot && typeof file.onebot === 'object' && !Array.isArray(file.onebot) ? file.onebot : {};
+  const rawSnowLuma = file.snowluma && typeof file.snowluma === 'object' && !Array.isArray(file.snowluma) ? file.snowluma : {};
+  const oneBotAdapter = String(rawOneBot.adapter ?? '').trim().toLowerCase() === 'napcat' ? 'napcat' : 'snowluma';
+  const oneBotWsUrl = String(oneBotAdapter === 'napcat' ? (rawOneBot.wsUrl || rawSnowLuma.wsUrl || 'ws://127.0.0.1:3001') : (rawSnowLuma.wsUrl || 'ws://127.0.0.1:3001'));
+  const oneBotHttpUrl = String(oneBotAdapter === 'napcat' ? (rawOneBot.httpUrl || rawSnowLuma.httpUrl || 'http://127.0.0.1:3000') : (rawSnowLuma.httpUrl || 'http://127.0.0.1:3000'));
+  const oneBotWsToken = String(rawOneBot.wsAccessToken ?? rawOneBot.accessToken ?? rawSnowLuma.accessToken ?? '');
+  const oneBotHttpToken = String(rawOneBot.httpAccessToken ?? rawOneBot.accessToken ?? rawSnowLuma.accessToken ?? '');
   const cfg = {
     dsh: {
       baseUrl: 'http://127.0.0.1:3080',
@@ -781,7 +789,22 @@ function loadConfig() {
       allowRemote: false,
       ...(file.dsh ?? {})
     },
-    snowluma: { wsUrl: 'ws://127.0.0.1:3001', accessToken: '', ...(file.snowluma ?? {}) },
+    // Keep legacy config.snowluma consumers working while selecting the transport independently.
+    // NapCat uses explicit tokens; SnowLuma retains its per-account auto-discovery behavior.
+    snowluma: {
+      ...rawSnowLuma,
+      wsUrl: oneBotWsUrl,
+      httpUrl: oneBotHttpUrl,
+      accessToken: oneBotAdapter === 'napcat' ? oneBotHttpToken : String(rawSnowLuma.accessToken ?? '')
+    },
+    onebot: {
+      ...rawOneBot,
+      adapter: oneBotAdapter,
+      wsUrl: oneBotWsUrl,
+      httpUrl: oneBotHttpUrl,
+      wsAccessToken: oneBotWsToken,
+      httpAccessToken: oneBotHttpToken
+    },
     // 空 => 每个会话在 state/agents/<key> 下建独立工作目录
     sessionCwd: file.sessionCwd ?? '',
     agentPreset: file.agentPreset ?? 'qq-chat',
@@ -14703,12 +14726,21 @@ async function main() {
     }
   }
 
-  // QQ 侧（SnowLuma OneBot WebSocket 客户端）
-  const bot = new SnowLumaWebSocketClient({
-    url: cfg.snowluma.wsUrl,
-    accessToken: cfg.snowluma.accessToken || undefined,
-    reconnect: true
-  });
+  // QQ transport: keep SnowLuma as the backwards-compatible Windows default, and use NapCat when selected.
+  const gatewayLabel = cfg.onebot?.adapter === 'napcat' ? 'NapCat' : 'SnowLuma';
+  const bot = cfg.onebot?.adapter === 'napcat'
+    ? new NapCatWebSocketClient({
+      url: cfg.onebot.wsUrl,
+      httpUrl: cfg.onebot.httpUrl,
+      accessToken: cfg.onebot.wsAccessToken,
+      httpAccessToken: cfg.onebot.httpAccessToken,
+      reconnect: true
+    })
+    : new SnowLumaWebSocketClient({
+      url: cfg.snowluma.wsUrl,
+      accessToken: cfg.snowluma.accessToken || undefined,
+      reconnect: true
+    });
 
   bot.onPrivateMessage(async (event) => {
     // 统一按字符串比较：网关可能把 id 序列化成 number/string 混用，
@@ -14771,9 +14803,9 @@ async function main() {
 
   bot.on('open', () => {
     // 用实际连接地址（自愈后可能与 config 里的初值不同，别打印过期的那个）
-    const connectedUrl = bot.url ?? cfg.snowluma.wsUrl;
+    const connectedUrl = bot.url ?? cfg.onebot?.wsUrl ?? cfg.snowluma.wsUrl;
     snowlumaHealth.connected = true;
-    log(`SnowLuma 已连接：${connectedUrl}`);
+    log(`${gatewayLabel} 已连接：${connectedUrl}`);
     // 「已连接」只说明与 SnowLuma 的 WebSocket 通了，**不说明 QQ 侧收得到消息** ——
     // 这个区别见 startSnowlumaWatch 的说明。这里顺手把上游健康快照刷一次。
     void pollSnowlumaStatus();
@@ -14867,6 +14899,7 @@ async function main() {
 
   /** 只写文件、不动物件（连接已成功时用）。 */
   async function syncTokenToFile() {
+    if (cfg.onebot?.adapter === 'napcat') return; // Never persist NapCat tokens into the legacy SnowLuma config fields.
     try {
       const r = persistToken(path.join(ROOT, 'config.json'), cfg.snowluma.accessToken ?? '');
       // 只记「已写回」，不打印 token 片段：日志会被贴进 issue / 截图，
@@ -14877,6 +14910,7 @@ async function main() {
 
   let tokenHealAt = 0;
   async function healTokenIfStale(reason) {
+    if (cfg.onebot?.adapter === 'napcat') return; // NapCat uses explicit endpoint/tokens, not SnowLuma's per-account token discovery.
     const now = Date.now();
     if (now - tokenHealAt < 10000) return;   // 节流：close 事件会连续触发
     tokenHealAt = now;
@@ -14921,7 +14955,7 @@ async function main() {
     // → 重连成功后才是「SnowLuma 已连接」。若 homeDir 没配/被移动/读不到 SnowLuma 的
     // config/onebot_<QQ>.json，自愈就无从下手，这时才会一直连不上 —— 那种情况请查
     // 日志里的「token 自愈失败」与 config.json 的 snowluma.homeDir。
-    log(`SnowLuma 首次连接未成功（将在后台自动重连并尝试自愈 WS token）: ${error?.message ?? error}`);
+    log(`${gatewayLabel} 首次连接未成功（将在后台自动重连）: ${error?.message ?? error}`);
   });
   log('桥接已启动。按 Ctrl+C 退出。');
   // 预热表情库：启动时同步一次 QQ 收藏表情，失败不阻塞（AI 首次调用工具时还会再试）。
